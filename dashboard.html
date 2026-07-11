@@ -1,0 +1,1233 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Dashboard Comparativo · Muebles Imperial & El Rey</title>
+
+<!-- Librerías (requieren internet la primera vez que se abre el archivo) -->
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/prop-types@15/prop-types.min.js"></script>
+<script src="https://unpkg.com/recharts@2.12.7/umd/Recharts.js"></script>
+<script src="https://unpkg.com/papaparse@5.4.1/papaparse.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone@7/babel.min.js"></script>
+
+<style>
+  :root{
+    --bg:#0b0b0d; --panel:#141418; --panel2:#1c1c22; --line:#2a2a32;
+    --gold:#E5B84E; --gold-soft:#c9a24a; --steel:#9FB6D0; --steel-soft:#7f97b3;
+    --txt:#EDEDF0; --muted:#9a9aa6; --green:#37c46f; --red:#f2555a; --amber:#f0b429;
+  }
+  html,body{background:var(--bg); color:var(--txt); font-family:'Segoe UI',system-ui,-apple-system,sans-serif;}
+  *{scrollbar-width:thin; scrollbar-color:#3a3a44 transparent;}
+  ::-webkit-scrollbar{height:8px;width:8px}
+  ::-webkit-scrollbar-thumb{background:#3a3a44;border-radius:8px}
+  .card{background:linear-gradient(180deg,var(--panel),#101014);border:1px solid var(--line);border-radius:16px}
+  .gold-text{color:var(--gold)}
+  .steel-text{color:var(--steel)}
+  .btn{border:1px solid var(--line);background:var(--panel2);color:var(--txt);border-radius:10px;padding:.45rem .8rem;font-size:.82rem;transition:.15s;cursor:pointer}
+  .btn:hover{border-color:var(--gold);color:var(--gold)}
+  .btn-active{background:var(--gold);color:#151208;border-color:var(--gold);font-weight:600}
+  .chip{border:1px solid var(--line);background:var(--panel2);border-radius:999px;padding:.25rem .7rem;font-size:.75rem;cursor:pointer}
+  .chip-on{border-color:var(--gold);color:var(--gold)}
+  .inp{background:#0e0e12;border:1px solid var(--line);border-radius:8px;padding:.4rem .6rem;color:var(--txt);font-size:.82rem;width:100%}
+  .inp:focus{outline:none;border-color:var(--gold)}
+  .lbl{font-size:.68rem;text-transform:uppercase;letter-spacing:.08em;color:var(--muted)}
+  .glow-gold{box-shadow:0 0 0 1px rgba(229,184,78,.35),0 8px 30px -12px rgba(229,184,78,.25)}
+  .glow-steel{box-shadow:0 0 0 1px rgba(159,182,208,.35),0 8px 30px -12px rgba(159,182,208,.2)}
+  table{border-collapse:collapse}
+  .fade{animation:f .4s ease}
+  @keyframes f{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:none}}
+</style>
+</head>
+<body>
+<div id="root" class="min-h-screen"></div>
+
+<script type="text/babel" data-presets="react">
+const { useState, useEffect, useMemo, useRef } = React;
+const {
+  ResponsiveContainer, AreaChart, Area, LineChart, Line, BarChart, Bar,
+  PieChart, Pie, Cell, XAxis, YAxis, CartesianGrid, Tooltip, Legend, Treemap
+} = Recharts;
+
+/* ====================================================================== *
+ * CONFIGURACIÓN
+ * ====================================================================== */
+
+// ID de la hoja de Google. El endpoint gviz suele permitir CORS si la hoja
+// está compartida como "cualquiera con el enlace puede ver".
+const SHEET_ID = "1HRqhDS_63PWVutrRCHbEVEFtk0-n_r86ErlBMpAc0KE";
+// El endpoint "export" devuelve la pestaña completa. El gviz se detiene en la
+// primera fila en blanco (parte la hoja de ventas), por eso va solo de respaldo.
+const EXPORT = gid => `https://docs.google.com/spreadsheets/d/${SHEET_ID}/export?format=csv&gid=${gid}`;
+const GVIZ   = `https://docs.google.com/spreadsheets/d/${SHEET_ID}/gviz/tq?tqx=out:csv`;
+// gid de cada pestaña del libro "SEGUIMIENTO_PEDIDOS_MUEBLES_EL REY UNIFICADO"
+const TABS = {
+  ventas:    [EXPORT("1400904314"), EXPORT("0"), GVIZ], // JULIO (ambas tiendas)
+  gastos:    [EXPORT("2010891201")],                    // GASTOS (operativos)
+  marketing: [EXPORT("1892758411")],                    // MARKETING_JULIO (embudo)
+};
+const REFRESH_MS = 60000; // re-consulta cada 60 s
+
+// Colores fijos por tienda (consistentes en todo el dashboard)
+const COL = { imperial:"#E5B84E", elrey:"#9FB6D0" };
+const STORE = {
+  imperial:{ id:"imperial", nombre:"Muebles Imperial", sede:"Jamundí",  color:COL.imperial, match:"JAMUND" },
+  elrey:   { id:"elrey",    nombre:"Muebles El Rey",   sede:"Cerritos", color:COL.elrey,    match:"CERRITOS" },
+};
+// Paleta para orígenes / canales
+const ORIGEN_COLORS = ["#E5B84E","#9FB6D0","#c98a3a","#5f7fa6","#e0d089","#6f6f7a"];
+
+/* ====================================================================== *
+ * DATOS DE RESPALDO (se muestran si el fetch en vivo falla).
+ * Sin datos personales: solo lo necesario para los indicadores.
+ * ====================================================================== */
+const FALLBACK = `FECHA|VENDEDOR|SEDE|ORIGEN CLIENTE|VENTA|NÚMERO DE PEDIDO|PRODUCTO|CIUDAD|FORMA DE PAGO|TOTAL VENTA|SALDO PAGADO|SALDO POR COBRAR
+01/07/2026|SARA GIRALDO|JAMUNDÍ|TIENDA FISICA|SI|PPAL-218|ALACENA|JAMUNDI|SISTECREDITO|570000||
+01/07/2026|SARA GIRALDO|JAMUNDÍ|TIENDA FISICA|SI|PPAL-75|COMEDOR ORION|JAMUNDI|EFECTIVO|1300000||
+01/07/2026|SARA GIRALDO|JAMUNDÍ|REFERIDO|SI|PPAL-76|ANATOMICO|JAMUNDI|EFECTIVO|500000||
+01/07/2026|SARA GIRALDO|JAMUNDÍ|TIENDA FISICA|SI|PPAL-131|ARMARIO 2X2|JAMUNDI|EFECTIVO|1300000||
+01/07/2026|SARA GIRALDO|JAMUNDÍ|TIENDA FISICA|SI|PPAL-132|BAUL|JAMUNDI|NEQUI|280000||
+01/07/2026|SARA GIRALDO|JAMUNDÍ|TIENDA FISICA|SI|PPAL-130|ESPEJO|JAMUNDI|SISTECREDITO|387500||
+01/07/2026|SARA GIRALDO|JAMUNDÍ|TIENDA FISICA|SI|PPAL-129|SOFA CAMA CARRITO|JAMUNDI|TRANSFERENCIA|1600000|300000|
+02/06/2026|NICOL|CERRITOS|PAUTA PRESENCIAL|SI|RC926|SALA BOSTON|PEREIRA|EFECTIVO|200000|200000|
+02/07/2026|NICOL|CERRITOS|PAUTA PRESENCIAL|SI|RC926|SALA BOSTON|PEREIRA|SISTECREDITO|2210000|1210000|
+02/07/2026|EDUARDO|CERRITOS|REFERIDO|SI|RC927|SALA|PEREIRA|EFECTIVO|3000000|1500000|
+02/07/2026|NICOL|CERRITOS|PAUTA WHATSAPP|SI|RC928|CAMA NICHO|APIA|DAVIVIENDA|1300000|650000|
+02/07/2026|EDUARDO|CERRITOS|REFERIDO|SI|RC929|COMEDOR 4 PUESTOS|DOSQUEBRADAS|BANCOLOMBIA|3900000|3900000|
+02/07/2026|NICOL|CERRITOS|PAUTA PRESENCIAL|SI|RC930|SOFA CAMA CARRITO|PEREIRA|EFECTIVO|1800000|1800000|
+02/07/2026|NICOL|CERRITOS|PAUTA PRESENCIAL|SI|RC931|SALA|LA UNION|BANCOLOMBIA|2950000|2950000|
+02/07/2026|SARA GIRALDO|JAMUNDÍ|TIENDA FISICA|SI|PPAL-219|BASE + COLCHON|JAMUNDI|TRANSFERENCIA|1790000||
+02/07/2026|SARA GIRALDO|JAMUNDÍ|TIENDA FISICA|SI|1469|ESPEJO|JAMUNDI|EFECTIVO|400000|100000|
+03/07/2026|SARA GIRALDO|JAMUNDÍ|TIENDA FISICA|SI|1473|SALA+COMEDOR 4 PUESTOS|JAMUNDI|TRANSFERENCIA|4100000|500000|
+03/07/2026|SARA GIRALDO|JAMUNDÍ|TIENDA FISICA|SI|1474|SOFA CAMA SENCILLO|JAMUNDI|BOLD|900000||
+04/07/2026|SARA GIRALDO|JAMUNDÍ|TIENDA FISICA|SI|1477|COLCHON PILLOWTOP GRANDE|JAMUNDI|BOLD|1250000||
+03/07/2026|EDUARDO|CERRITOS|REFERIDO|NO|RC932|ABONO PEDIDOS|PEREIRA|EFECTIVO|2000000|2000000|
+03/07/2026|NICOL|CERRITOS|PAUTA WHATSAPP|SI|RC933|SALA TRES MODULOS|PEREIRA|NEQUI|1350000|700000|650000
+03/07/2026|NICOL|CERRITOS|PAUTA WHATSAPP|SI|RC934|SALA VENECIA|CARTAGO|BANCOLOMBIA|2500000|1000000|
+03/07/2026|EDUARDO|CERRITOS|PAUTA WHATSAPP|SI|RC935|SALA BOSTON|DOSQUEBRADAS|EFECTIVO|2300000|200000|
+03/07/2026|SARA GIRALDO|JAMUNDÍ|PAUTA PRESENCIAL|SI|1471|COMBO MONARCA|JAMUNDI|EFECTIVO|1350000||
+03/07/2026|SARA GIRALDO|JAMUNDÍ|TIENDA FISICA|SI|1472|COLCHON MONARCA|JAMUNDI|EFECTIVO|700000||
+03/07/2026|SARA GIRALDO|JAMUNDÍ|TIENDA FISICA|SI|1476|BASE+ESPALDAR|CALI|BOLD|790000||
+04/07/2026|SARA GIRALDO|JAMUNDÍ|TIENDA FISICA|SI|1478|ARMARIO DE 1,00|JAMUNDI|EFECTIVO|650000||
+04/07/2026|SARA GIRALDO|JAMUNDÍ|REFERIDO|SI|1480|BASE CAMA|JAMUNDI|BOLD|280000||
+04/07/2026|SARA GIRALDO|JAMUNDÍ|PAUTA WHATSAPP|SI|1485|COMBO MONARCA|CALI|ADDI|1800000||
+04/07/2027|NICOL|CERRITOS|PAUTA PRESENCIAL|SI|RC936|COMEDOR FLOR MORADO|DOSQUEBRADAS|ADDI|2860000|2860000|
+04/07/2027|NICOL|CERRITOS|PAUTA WHATSAPP|SI|RC937|SALA Y COMEDOR|DOSQUEBRADAS|BANCOLOMBIA|7100000|2000000|5100000
+04/07/2027|EDUARDO|CERRITOS|PAUTA PRESENCIAL|SI|RC938|SALA Y COMEDOR|BELEN DE UMBRIA|BANCOLOMBIA|5550000|4000000|1550000
+04/07/2027|EDUARDO|CERRITOS|PAUTA PRESENCIAL|SI|RC939|SALA ALEMANA|PEREIRA|BANCOLOMBIA|4000000|2000000|2000000
+04/07/2027|EDUARDO|CERRITOS|PAUTA PRESENCIAL|SI|RC940|SALA ROMA|PEREIRA|BOLD|2800000|1400000|1400000
+04/07/2027|NICOL|CERRITOS|PAUTA WHATSAPP|SI|RC941|CAMA NUBE|PEREIRA|BANCOLOMBIA|1800000|900000|900000
+04/07/2027|NICOL|CERRITOS|PAUTA WHATSAPP|SI|RC942|SALA IMPERIAL|PEREIRA|BANCOLOMBIA|1900000|190000|
+05/07/2026|SARA GIRALDO|JAMUNDÍ|TIENDA FISICA|SI|1482|SILLAS DE COMEDOR|JAMUNDI|MIXTO|1410000||
+05/07/2026|EDUARDO|CERRITOS|TIENDA FISICA|SI|RC943|SALA BOSTON|DOSQUEBRADAS|BANCOLOMBIA|2300000|2300000|
+05julio|NICOL|CERRITOS|TIENDA FISICA|NO|RC944|ABONO PEDIDOS|PEREIRA|BANCOLOMBIA|1500000|1600000|
+05/07/2026|NICOL|CERRITOS|PAUTA WHATSAPP|SI|RC945|SALA TRES MODULOS|DOSQUEBRADAS|MIXTO|1385000|692000|693000
+5julio|NICOL|CERRITOS|PAUTA PRESENCIAL|SI|RC946|SALA CAPRIANY|PEREIRA|BANCOLOMBIA|3300000|3000000|300000
+05/07/2026|SARA GIRALDO|JAMUNDÍ|PAUTA WHATSAPP|SI|1483|BASE+ESPALDAR|JAMUNDI|EFECTIVO|700000||
+06/07/2026|SARA GIRALDO|JAMUNDÍ|TIENDA FISICA|SI|1487|COLCHON MONARCA|JAMUNDI|EFECTIVO|700000||
+06/07/2026|SARA GIRALDO|JAMUNDÍ|PAUTA WHATSAPP|SI|1489|SALA ALEMANA|JAMUNDI|SISTECREDITO|3190000||
+06/07/2026|SARA GIRALDO|JAMUNDÍ|TIENDA FISICA|SI|1490|SALA 3 MODULOS|JAMUNDI|MIXTO|1300000||
+6julio|NICOL|CERRITOS|PAUTA WHATSAPP|SI|RC947|SOFA CAMA CARRITO|PEREIRA|BANCOLOMBIA|2500000|1250000|1250000
+06/07/2026|EDUARDO|CERRITOS|TIENDA FISICA|NO|FO856|SALA ROMA|PEREIRA|EFECTIVO|1400000|1400000|
+07/07/2026|NICOL|CERRITOS|TIENDA FISICA|NO|FO858|SALA TRES MODULOS|DOSQUEBRADAS|BANCOLOMBIA|693000|693000|
+07/07/2026|NICOL|CERRITOS|PAUTA WHATSAPP|SI|RC948|SALA LUNA-COMEDOR 4 PUESTOS|PEREIRA|BOLD|7200000|7200000|0
+08/07/2026|NICOL|CERRITOS|TIENDA FISICA|NO|FO860|SALA CAPRIANY|LA VIRGINIA|EFECTIVO|1300000|1300000|
+08/07/2026|EDUARDO|CERRITOS|REFERIDO|SI|RC949|CAMA NUBE|PEREIRA|BANCOLOMBIA|1750000|800000|950000
+08/07/2026|NICOL|CERRITOS|PAUTA WHATSAPP|SI|RC950|CAMA NUBE|PEREIRA|BANCOLOMBIA|1700000|1700000|
+09/07/2026|NICOL|CERRITOS|PAUTA WHATSAPP|SI|RC951|SALA ALEMANA|DOSQUEBRADAS|BOLD|3432000|3432000|
+09/07/2026|NICOL|CERRITOS|PAUTA WHATSAPP|SI|RC952|SOFA CAMA CARRITO|DOSQUEBRADAS|EFECTIVO|1800000|800000|1000000
+09/07/2026|EDUARDO|CERRITOS|TIENDA FISICA|SI|FO862|PEINADOR|BELEN DE UMBRIA|EFECTIVO|1700000|1700000|
+09/07/2026|NICOL|CERRITOS|PAUTA PRESENCIAL|SI|RC953|CAMA NUBE|PEREIRA|ADDI|1950000|1500000|450000
+10/07/2026|RONAL|CERRITOS|PAUTA PRESENCIAL|SI|RC955|COMEDOR ORION|SANTUARIO||0||`;
+
+/* ====================================================================== *
+ * UTILIDADES
+ * ====================================================================== */
+const norm = s => (s==null?"":String(s)).trim();
+const up   = s => norm(s).toUpperCase();
+
+// Convierte "$1.300.000" / "1300000" / "" -> número
+function parseCOP(v){
+  if(v==null) return 0;
+  const s = String(v).replace(/[^\d,-]/g,"").replace(/\./g,"").replace(/,/g,".");
+  const n = parseFloat(s);
+  return isNaN(n)?0:n;
+}
+// Formatos
+const fmtCOP = n => "$"+Math.round(n||0).toLocaleString("es-CO");
+const fmtInt = n => (n||0).toLocaleString("es-CO");
+const fmtPct = (n,d=1) => (n==null||isNaN(n)) ? "—" : n.toFixed(d)+"%";
+const safeDiv = (a,b) => (!b||b===0) ? null : a/b;
+
+const MESES = {enero:1,febrero:2,marzo:3,abril:4,mayo:5,junio:6,julio:7,agosto:8,
+  septiembre:9,setiembre:9,octubre:10,noviembre:11,diciembre:12};
+const MES_NOMBRE = ["Ene","Feb","Mar","Abr","May","Jun","Jul","Ago","Sep","Oct","Nov","Dic"];
+const DIAS = ["Dom","Lun","Mar","Mié","Jue","Vie","Sáb"];
+
+// Parseo tolerante de fechas: dd/mm/yyyy, dd-mm-yy, "5julio", "05 de julio"
+function parseFecha(raw){
+  const s = norm(raw);
+  if(!s) return null;
+  let m = s.match(/^(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{2,4})$/);
+  if(m){ let d=+m[1],mo=+m[2],y=+m[3]; if(y<100)y+=2000; const dt=new Date(y,mo-1,d); return isNaN(dt.getTime())?null:dt; }
+  m = s.toLowerCase().replace(/\s+/g,"").match(/^(\d{1,2})de?([a-záéíóú]+)/);
+  if(m && MESES[m[2]]) { const dt=new Date(2026,MESES[m[2]]-1,+m[1]); return isNaN(dt.getTime())?null:dt; }
+  const dt=new Date(s); return isNaN(dt.getTime())?null:dt;
+}
+const ymd = d => d ? d.getFullYear()+"-"+String(d.getMonth()+1).padStart(2,"0")+"-"+String(d.getDate()).padStart(2,"0") : "";
+const ym  = d => d ? d.getFullYear()+"-"+String(d.getMonth()+1).padStart(2,"0") : "";
+const diasEnMes = (y,m0) => new Date(y,m0+1,0).getDate();
+
+// Detecta a qué tienda pertenece una fila según el valor de SEDE (con override)
+function tiendaDe(sedeRaw, mapImperial, mapElrey){
+  const s = up(sedeRaw);
+  if(mapImperial && s===up(mapImperial)) return "imperial";
+  if(mapElrey    && s===up(mapElrey))    return "elrey";
+  if(s.includes(STORE.imperial.match)) return "imperial";
+  if(s.includes(STORE.elrey.match))    return "elrey";
+  return null;
+}
+
+/* ====================================================================== *
+ * PARSEO DEL CSV -> filas normalizadas
+ * Detecta la fila de encabezados aunque haya filas vacías arriba.
+ * ====================================================================== */
+const HEADER_HINTS = {
+  fecha:["fecha"], vendedor:["vendedor","asesor"], sede:["sede","tienda","cliente","local"],
+  origen:["origen","canal","fuente"], venta:["venta","cerr","estado"],
+  pedido:["pedido","orden","factura","nº","no."], producto:["producto","articulo","artículo","item"],
+  ciudad:["ciudad","municipio"], pago:["forma de pago","pago","metodo","método"],
+  total:["total venta","total","valor","ingreso","monto"],
+  pagado:["saldo  pagado","saldo pagado","pagado","abono"],
+  cobrar:["saldo  por cobrar","por cobrar","saldo pendiente","pendiente"],
+};
+
+function detectarCols(headers){
+  const H = headers.map(h=>up(h));
+  const find = keys => {
+    for(let i=0;i<H.length;i++){ for(const k of keys){ if(H[i].includes(up(k))) return i; } }
+    return -1;
+  };
+  const map = {};
+  for(const [campo,keys] of Object.entries(HEADER_HINTS)) map[campo]=find(keys);
+  return map;
+}
+
+function parseCSV(texto){
+  const res = Papa.parse(texto.trim(), {skipEmptyLines:true});
+  let rows = res.data.filter(r=>r.some(c=>norm(c)!==""));
+  if(!rows.length) return {headers:[],data:[]};
+  // Buscar fila de encabezado (la que contiene "SEDE" o "FECHA")
+  let hi = 0;
+  for(let i=0;i<Math.min(rows.length,6);i++){
+    const j = rows[i].map(up).join("|");
+    if(j.includes("SEDE") || j.includes("FECHA") || j.includes("VENDEDOR")){ hi=i; break; }
+  }
+  const headers = rows[hi];
+  const body = rows.slice(hi+1);
+  return {headers, body};
+}
+
+// Detecta hoja pipe-delimitada (respaldo) o coma (gviz)
+function parseFuente(texto){
+  const delim = texto.includes("|") && !texto.split("\n")[0].includes(",") ? "|" : ",";
+  const res = Papa.parse(texto.trim(), {skipEmptyLines:true, delimiter:delim});
+  let rows = res.data.filter(r=>r.some(c=>norm(c)!==""));
+  if(!rows.length) return {headers:[],body:[]};
+  let hi=0;
+  for(let i=0;i<Math.min(rows.length,6);i++){
+    const j = rows[i].map(up).join("|");
+    if(j.includes("SEDE")||j.includes("FECHA")){ hi=i; break; }
+  }
+  return {headers:rows[hi], body:rows.slice(hi+1)};
+}
+
+// Descarga el primer CSV válido de una lista de URLs (ignora HTML de login).
+async function fetchTexto(urls){
+  for(const u of urls){
+    try{
+      const r = await fetch(u, {cache:"no-store"});
+      if(!r.ok) continue;
+      const t = await r.text();
+      if(/<html|<!doctype/i.test(t)) continue;
+      if(t.trim()) return t;
+    }catch(e){ /* siguiente */ }
+  }
+  return null;
+}
+
+/* ---------- Pestaña GASTOS (gastos operativos) ----------
+ * Columnas: FECHA, CAJA, GAS, PROVEEDOR, GASOLINA, ACARREO, COMISIONES,
+ * ENTREGA DIA, VARIOS, TOTAL, OBSERVACIÓN. Sumamos solo columnas de gasto
+ * claras (no CAJA ni ENTREGA DIA, que son ambiguas). */
+function parseGastos(txt){
+  if(!txt) return {dias:[], total:0};
+  const {headers, body} = parseFuente(txt);
+  if(!headers.length) return {dias:[], total:0};
+  const H = headers.map(up);
+  const idx = n => H.findIndex(h=>h.includes(up(n)));
+  const iF = idx("FECHA");
+  const cols = ["GAS","PROVEEDOR","GASOLINA","ACARREO","COMISIONES","VARIOS"]
+    .map(c=>idx(c)).filter(i=>i>=0);
+  const dias=[]; let total=0;
+  for(const row of body){
+    const f = parseFecha(row[iF]);
+    let g=0; cols.forEach(i=>{ g+=parseCOP(row[i]); });
+    if(g>0){ dias.push({fecha:f, k:f?ymd(f).slice(5):"s/f", gasto:g}); total+=g; }
+  }
+  return {dias, total};
+}
+
+/* ---------- Pestaña MARKETING_JULIO (embudo por vendedor) ----------
+ * Bloques apilados: fila cabecera "FECHA, CONTACTOS <V>, COTIZACIONES <V>,
+ * VENTAS <V>, TOTAL <V>" y luego una fila por día. */
+function parseMarketing(txt){
+  if(!txt) return {vendedores:[], contactos:0, cotizaciones:0, ventas:0};
+  const res = Papa.parse(txt.trim(), {skipEmptyLines:true});
+  const rows = res.data;
+  const vend={}; let cur=null;
+  for(const row of rows){
+    const c0=up(row[0]||""), c1=up(row[1]||"");
+    if(c1.includes("CONTACTOS")){                       // inicia bloque de un vendedor
+      cur = norm(row[1]).replace(/CONTACTOS/i,"").replace(/\s+/g," ").trim() || "—";
+      vend[cur] = vend[cur] || {vendedor:cur, contactos:0, cotizaciones:0, ventas:0};
+      continue;
+    }
+    if(c0==="TOTAL" || c0==="FECHA" || !cur) continue;
+    if(!parseFecha(row[0])) continue;
+    vend[cur].contactos    += parseInt(row[1])||0;
+    vend[cur].cotizaciones += parseInt(row[2])||0;
+    vend[cur].ventas       += parseInt(row[3])||0;
+  }
+  const vendedores = Object.values(vend).filter(v=>v.contactos||v.cotizaciones||v.ventas);
+  const sum = k => vendedores.reduce((a,v)=>a+v[k],0);
+  return {vendedores, contactos:sum("contactos"), cotizaciones:sum("cotizaciones"), ventas:sum("ventas")};
+}
+
+/* ====================================================================== *
+ * COMPONENTES DE UI
+ * ====================================================================== */
+function Delta({actual, previo, invertir=false, money=false}){
+  if(previo==null || previo===0 || actual==null) return <span className="text-[10px] text-[var(--muted)]">— sin comparativo</span>;
+  const dif = ((actual-previo)/Math.abs(previo))*100;
+  const good = invertir ? dif<0 : dif>=0;
+  return <span className="text-[11px] font-semibold" style={{color: good?"var(--green)":"var(--red)"}}>
+    {dif>=0?"▲":"▼"} {Math.abs(dif).toFixed(1)}%
+  </span>;
+}
+
+function KPI({titulo, valor, sub, color, previo, actualNum, invertir, ganador}){
+  return (
+    <div className="card p-4 fade relative" style={{borderColor: ganador?color:undefined, boxShadow: ganador?`0 0 0 1px ${color}55`:undefined}}>
+      {ganador && <span className="absolute top-2 right-2 text-[9px] px-2 py-[2px] rounded-full font-bold" style={{background:color,color:"#151208"}}>MEJOR</span>}
+      <div className="lbl">{titulo}</div>
+      <div className="text-xl font-bold mt-1" style={{color:color||"var(--txt)"}}>{valor}</div>
+      <div className="flex items-center gap-2 mt-1">
+        {previo!==undefined && <Delta actual={actualNum} previo={previo} invertir={invertir}/>}
+        {sub && <span className="text-[11px] text-[var(--muted)]">{sub}</span>}
+      </div>
+    </div>
+  );
+}
+
+const boxTip = {background:"#0e0e12",border:"1px solid var(--line)",borderRadius:10,fontSize:12};
+function ChartCard({titulo, children, alto=260, extra}){
+  return (
+    <div className="card p-4 fade">
+      <div className="flex items-center justify-between mb-2">
+        <h3 className="text-sm font-semibold text-[var(--txt)]">{titulo}</h3>
+        {extra}
+      </div>
+      <div style={{width:"100%",height:alto}}>{children}</div>
+    </div>
+  );
+}
+
+/* ====================================================================== *
+ * CÁLCULO DE INDICADORES
+ * ====================================================================== */
+function calcKPIs(filas){
+  const total = filas.reduce((a,f)=>a+f.total,0);
+  const ventasSI = filas.filter(f=>f.esVenta);
+  const ingresos = ventasSI.reduce((a,f)=>a+f.total,0);
+  const pedidos = new Set(ventasSI.map(f=>f.pedido||Math.random())).size;
+  const nVentas = ventasSI.length;
+  const pagado = filas.reduce((a,f)=>a+f.pagado,0);
+  const porCobrar = filas.reduce((a,f)=>a+(f.cobrar||0),0);
+  const ticket = safeDiv(ingresos, nVentas);
+  const cierre = safeDiv(ventasSI.length, filas.length); // % de registros que cerraron en venta
+  const pctCobrado = safeDiv(pagado, ingresos);
+  return {
+    ingresos, pedidos, nVentas, ticket, pagado, porCobrar,
+    cierre: cierre==null?null:cierre*100,
+    pctCobrado: pctCobrado==null?null:pctCobrado*100,
+    registros: filas.length, totalBruto: total,
+  };
+}
+
+/* ====================================================================== *
+ * APP PRINCIPAL
+ * ====================================================================== */
+function App(){
+  const [raw,setRaw] = useState({headers:[],body:[]});
+  const [estado,setEstado] = useState("cargando"); // cargando | vivo | respaldo | error
+  const [ultAct,setUltAct] = useState(null);
+  const [mostrarMapeo,setMostrarMapeo] = useState(false);
+  const [pegar,setPegar] = useState("");
+
+  // Mapeo de columnas
+  const [colMap,setColMap] = useState({});
+  const [mapImperial,setMapImperial] = useState("JAMUNDÍ");
+  const [mapElrey,setMapElrey] = useState("CERRITOS");
+
+  // Vista y filtros
+  const [vista,setVista] = useState("ambas"); // ambas | imperial | elrey | comparativa
+  const [gran,setGran] = useState("dia");     // dia | semana | mes
+  const [fIni,setFIni] = useState("");
+  const [fFin,setFFin] = useState("");
+  const [fOrigen,setFOrigen] = useState("todos");
+  const [fVendedor,setFVendedor] = useState("todos");
+  const [verImperial,setVerImperial] = useState(true);
+  const [verElrey,setVerElrey] = useState(true);
+
+  // Metas mensuales por tienda (planificador). { "imperial|2026-07": 30000000 }
+  const [metas,setMetas] = useState({});
+  const [objetivos,setObjetivos] = useState({imperial:25000000, elrey:35000000}); // meta de referencia
+  const [simEsc,setSimEsc] = useState({}); // simulador: presupuesto/meta hipotética
+
+  // Texto crudo de las pestañas GASTOS y MARKETING
+  const [gastosTxt,setGastosTxt] = useState("");
+  const [mktTxt,setMktTxt] = useState("");
+
+  const timer = useRef(null);
+  const vivoRef = useRef(false); // ¿ya cargamos datos en vivo alguna vez?
+
+  /* ---------- Carga de datos (3 pestañas) ---------- */
+  const cargar = async () => {
+    const [tv,tg,tm] = await Promise.all([
+      fetchTexto(TABS.ventas),
+      fetchTexto(TABS.gastos),
+      fetchTexto(TABS.marketing),
+    ]);
+    if(tv){
+      const p = parseFuente(tv);
+      if(p.body.length){ setRaw(p); setEstado("vivo"); setUltAct(new Date()); vivoRef.current = true; }
+    }
+    if(tg!=null) setGastosTxt(tg);
+    if(tm!=null) setMktTxt(tm);
+    // Si nunca hubo datos en vivo, usar el respaldo incluido.
+    if(!vivoRef.current && !tv){
+      const p = parseFuente(FALLBACK);
+      setRaw(p); setEstado("respaldo"); setUltAct(new Date());
+    }
+  };
+
+  useEffect(()=>{
+    cargar();
+    timer.current = setInterval(cargar, REFRESH_MS);
+    return ()=>clearInterval(timer.current);
+  },[]);
+
+  // Auto-mapeo cuando llegan encabezados
+  useEffect(()=>{
+    if(raw.headers.length){ setColMap(detectarCols(raw.headers)); }
+  },[raw.headers]);
+
+  /* ---------- Normalización de filas ---------- */
+  const filas = useMemo(()=>{
+    if(!raw.body.length || colMap.sede==null) return [];
+    const g = (row,i)=> i>=0 && i<row.length ? row[i] : "";
+    const out = [];
+    for(const row of raw.body){
+      const sedeRaw = g(row,colMap.sede);
+      const tienda = tiendaDe(sedeRaw, mapImperial, mapElrey);
+      if(!tienda) continue;
+      const fecha = parseFecha(g(row,colMap.fecha));
+      const ventaTxt = up(g(row,colMap.venta));
+      out.push({
+        tienda,
+        fecha,
+        vendedor: norm(g(row,colMap.vendedor)) || "—",
+        origen: up(g(row,colMap.origen)) || "SIN ORIGEN",
+        esVenta: ventaTxt==="" ? true : (ventaTxt==="SI"||ventaTxt==="SÍ"||ventaTxt==="S"),
+        pedido: norm(g(row,colMap.pedido)),
+        producto: norm(g(row,colMap.producto)) || "—",
+        ciudad: up(g(row,colMap.ciudad)) || "—",
+        pago: up(g(row,colMap.pago)) || "—",
+        total: parseCOP(g(row,colMap.total)),
+        pagado: parseCOP(g(row,colMap.pagado)),
+        cobrar: parseCOP(g(row,colMap.cobrar)),
+      });
+    }
+    return out;
+  },[raw,colMap,mapImperial,mapElrey]);
+
+  // Valores únicos de SEDE (para el panel de mapeo)
+  const sedesUnicas = useMemo(()=>{
+    if(colMap.sede==null) return [];
+    const set = new Set();
+    raw.body.forEach(r=>{ const v=norm(r[colMap.sede]); if(v) set.add(v); });
+    return [...set];
+  },[raw,colMap]);
+
+  const origenes = useMemo(()=>[...new Set(filas.map(f=>f.origen))].sort(),[filas]);
+  const vendedores = useMemo(()=>[...new Set(filas.map(f=>f.vendedor))].sort(),[filas]);
+
+  // Rango de fechas disponible
+  const rangoFechas = useMemo(()=>{
+    const ds = filas.map(f=>f.fecha).filter(Boolean).sort((a,b)=>a-b);
+    return ds.length ? {min:ds[0],max:ds[ds.length-1]} : null;
+  },[filas]);
+
+  /* ---------- Aplicar filtros (sin filtro de fecha => para "previo") ---------- */
+  const pasaFiltrosBase = (f, ignorarTienda=false) => {
+    if(fOrigen!=="todos" && f.origen!==fOrigen) return false;
+    if(fVendedor!=="todos" && f.vendedor!==fVendedor) return false;
+    if(!ignorarTienda){
+      if(vista==="imperial" && f.tienda!=="imperial") return false;
+      if(vista==="elrey" && f.tienda!=="elrey") return false;
+    }
+    if(!verImperial && f.tienda==="imperial") return false;
+    if(!verElrey && f.tienda==="elrey") return false;
+    return true;
+  };
+  const enRango = (f,ini,fin)=>{
+    if(!f.fecha) return !ini && !fin;
+    if(ini && f.fecha < ini) return false;
+    if(fin && f.fecha > fin) return false;
+    return true;
+  };
+  const iniD = fIni ? new Date(fIni+"T00:00:00") : null;
+  const finD = fFin ? new Date(fFin+"T23:59:59") : null;
+
+  const filtradas = useMemo(()=> filas.filter(f=> pasaFiltrosBase(f) && enRango(f,iniD,finD)),
+    [filas,vista,fOrigen,fVendedor,verImperial,verElrey,fIni,fFin]);
+
+  // Conjunto del periodo anterior (misma longitud, justo antes)
+  const previas = useMemo(()=>{
+    if(!iniD || !finD) return null;
+    const len = finD - iniD;
+    const pIni = new Date(iniD.getTime()-len);
+    const pFin = new Date(iniD.getTime()-1);
+    return filas.filter(f=> pasaFiltrosBase(f) && enRango(f,pIni,pFin));
+  },[filas,vista,fOrigen,fVendedor,verImperial,verElrey,fIni,fFin]);
+
+  const porTienda = (arr,t)=> arr.filter(f=>f.tienda===t);
+
+  /* ---------- KPIs ---------- */
+  const kAmbas = useMemo(()=>calcKPIs(filtradas),[filtradas]);
+  const kImp = useMemo(()=>calcKPIs(porTienda(filtradas,"imperial")),[filtradas]);
+  const kRey = useMemo(()=>calcKPIs(porTienda(filtradas,"elrey")),[filtradas]);
+  const kPrevAmbas = useMemo(()=> previas?calcKPIs(previas):null,[previas]);
+  const kPrevImp = useMemo(()=> previas?calcKPIs(porTienda(previas,"imperial")):null,[previas]);
+  const kPrevRey = useMemo(()=> previas?calcKPIs(porTienda(previas,"elrey")):null,[previas]);
+
+  /* ---------- Series temporales ---------- */
+  const bucketKey = (d)=>{
+    if(!d) return "s/f";
+    if(gran==="mes") return ym(d);
+    if(gran==="semana"){
+      const t=new Date(d); const day=(t.getDay()+6)%7; t.setDate(t.getDate()-day);
+      return "sem "+ymd(t).slice(5);
+    }
+    return ymd(d).slice(5); // MM-DD
+  };
+  const serie = useMemo(()=>{
+    const m = {};
+    filtradas.forEach(f=>{
+      if(!f.esVenta) return;
+      const k = bucketKey(f.fecha);
+      m[k] = m[k] || {k, imperial:0, elrey:0, imperialP:0, elreyP:0};
+      m[k][f.tienda]+=f.total;
+      m[k][f.tienda+"P"]+=1;
+    });
+    return Object.values(m).sort((a,b)=>a.k<b.k?-1:1);
+  },[filtradas,gran]);
+
+  /* ---------- Comparativa directa ---------- */
+  const compData = useMemo(()=>[
+    {métrica:"Ingresos (M)", Imperial:kImp.ingresos/1e6, "El Rey":kRey.ingresos/1e6},
+    {métrica:"Pedidos", Imperial:kImp.nVentas, "El Rey":kRey.nVentas},
+    {métrica:"Ticket (M)", Imperial:(kImp.ticket||0)/1e6, "El Rey":(kRey.ticket||0)/1e6},
+  ],[kImp,kRey]);
+
+  /* ---------- Ventas por origen (por tienda) ---------- */
+  const origenData = useMemo(()=>{
+    const m={};
+    filtradas.forEach(f=>{ if(!f.esVenta)return;
+      m[f.origen]=m[f.origen]||{origen:f.origen,imperial:0,elrey:0};
+      m[f.origen][f.tienda]+=f.total; });
+    return Object.values(m).sort((a,b)=>(b.imperial+b.elrey)-(a.imperial+a.elrey));
+  },[filtradas]);
+
+  const donaOrigen = (t)=>{
+    const m={};
+    porTienda(filtradas,t).forEach(f=>{ if(!f.esVenta)return; m[f.origen]=(m[f.origen]||0)+f.total; });
+    return Object.entries(m).map(([name,value])=>({name,value})).sort((a,b)=>b.value-a.value);
+  };
+
+  /* ---------- Embudo por tienda ---------- */
+  const embudo = (t)=>{
+    const arr = porTienda(filtradas,t);
+    const registros = arr.length;
+    const ventas = arr.filter(f=>f.esVenta).length;
+    const pagadasFull = arr.filter(f=>f.esVenta && f.cobrar<=0 && f.total>0).length;
+    return [
+      {etapa:"Registros", v:registros},
+      {etapa:"Ventas cerradas", v:ventas},
+      {etapa:"Pagadas 100%", v:pagadasFull},
+    ];
+  };
+
+  /* ---------- Top vendedores / productos ---------- */
+  const [ordenVend,setOrdenVend] = useState("ingresos");
+  const topVend = useMemo(()=>{
+    const m={};
+    filtradas.forEach(f=>{ if(!f.esVenta)return;
+      const k=f.vendedor; m[k]=m[k]||{vendedor:f.vendedor,tienda:f.tienda,ingresos:0,pedidos:0};
+      m[k].ingresos+=f.total; m[k].pedidos+=1; });
+    let a=Object.values(m); a.forEach(x=>x.ticket=safeDiv(x.ingresos,x.pedidos)||0);
+    return a.sort((x,y)=>y[ordenVend]-x[ordenVend]);
+  },[filtradas,ordenVend]);
+
+  const topProd = useMemo(()=>{
+    const m={};
+    filtradas.forEach(f=>{ if(!f.esVenta)return;
+      const k=f.producto; m[k]=m[k]||{name:f.producto,value:0,n:0};
+      m[k].value+=f.total; m[k].n+=1; });
+    return Object.values(m).sort((a,b)=>b.value-a.value).slice(0,12);
+  },[filtradas]);
+
+  /* ---------- Forma de pago ---------- */
+  const pagoData = useMemo(()=>{
+    const m={};
+    filtradas.forEach(f=>{ if(!f.esVenta)return; m[f.pago]=(m[f.pago]||0)+f.total; });
+    return Object.entries(m).map(([name,value])=>({name,value})).sort((a,b)=>b.value-a.value).slice(0,8);
+  },[filtradas]);
+
+  /* ---------- Heatmap por día de semana ---------- */
+  const heat = useMemo(()=>{
+    const z = {imperial:Array(7).fill(0), elrey:Array(7).fill(0)};
+    filtradas.forEach(f=>{ if(!f.esVenta||!f.fecha)return; z[f.tienda][f.fecha.getDay()]+=f.total; });
+    return z;
+  },[filtradas]);
+
+  /* ---------- Planificador mensual (Meta de ventas) ---------- */
+  const mesActual = useMemo(()=>{
+    // mes con más ingresos en los datos
+    const m={};
+    filas.forEach(f=>{ if(f.fecha&&f.esVenta){const k=ym(f.fecha); m[k]=(m[k]||0)+f.total;} });
+    const best = Object.entries(m).sort((a,b)=>b[1]-a[1])[0];
+    return best?best[0]:ym(new Date());
+  },[filas]);
+
+  const [mesPlan,setMesPlan] = useState("");
+  useEffect(()=>{ if(mesActual && !mesPlan) setMesPlan(mesActual); },[mesActual]);
+
+  const planTienda = (t)=>{
+    const [y,mo] = (mesPlan||mesActual).split("-").map(Number);
+    const dim = diasEnMes(y,mo-1);
+    const arr = filas.filter(f=>f.tienda===t && f.fecha && ym(f.fecha)===(mesPlan||mesActual) && f.esVenta);
+    const real = arr.reduce((a,f)=>a+f.total,0);
+    const meta = metas[t+"|"+(mesPlan||mesActual)] ?? objetivos[t];
+    // días transcurridos: hasta el máx día con datos o hoy si el mes es actual
+    const maxDia = arr.reduce((mx,f)=>Math.max(mx,f.fecha.getDate()),0) || 1;
+    const hoy = new Date();
+    const diaRef = (ym(hoy)===(mesPlan||mesActual)) ? hoy.getDate() : maxDia;
+    const pace = diaRef/dim;
+    const proyeccion = pace>0 ? real/pace : real;
+    const metaEsperadaHoy = meta*pace;
+    const cumplido = safeDiv(real,meta);
+    const sim = simEsc[t+"|"+(mesPlan||mesActual)];
+    const metaSim = sim!=null ? sim : meta;
+    return {t,dim,diaRef,real,meta,metaSim,pace,proyeccion,metaEsperadaHoy,
+      cumplido: cumplido==null?0:cumplido*100,
+      proyVsMeta: safeDiv(proyeccion,metaSim),
+    };
+  };
+  const pImp = planTienda("imperial");
+  const pRey = planTienda("elrey");
+
+  const setMeta = (t,val)=> setMetas(m=>({...m,[t+"|"+(mesPlan||mesActual)]: parseCOP(val)}));
+  const setSim  = (t,val)=> setSimEsc(m=>({...m,[t+"|"+(mesPlan||mesActual)]: val}));
+
+  const estadoMeta = (p)=>{
+    const r = p.proyVsMeta;
+    if(r==null) return {c:"var(--muted)",t:"Sin meta",e:"⚪"};
+    if(r>=1) return {c:"var(--green)",t:"En meta",e:"🟢"};
+    if(r>=0.8) return {c:"var(--amber)",t:"En riesgo",e:"🟡"};
+    return {c:"var(--red)",t:"Bajo objetivo",e:"🔴"};
+  };
+
+  // ¿En cuál tienda conviene enfocar el próximo esfuerzo? (ticket promedio del mes)
+  const consejoInversion = useMemo(()=>{
+    const ti = kImp.ticket||0, tr = kRey.ticket||0;
+    const ci = kImp.cierre||0, cr = kRey.cierre||0;
+    // valor esperado por registro = ticket * tasa de cierre
+    const vi = ti*(ci/100), vr = tr*(cr/100);
+    if(vi===0 && vr===0) return null;
+    const gana = vi>=vr ? "imperial":"elrey";
+    return {gana, vi, vr};
+  },[kImp,kRey]);
+
+  /* ---------- GASTOS + RENTABILIDAD (pestaña GASTOS) ---------- */
+  const gastos = useMemo(()=>parseGastos(gastosTxt),[gastosTxt]);
+  const gastoTotal = useMemo(()=>
+    gastos.dias.filter(d=>enRango({fecha:d.fecha},iniD,finD)).reduce((a,d)=>a+d.gasto,0)
+  ,[gastos,fIni,fFin]);
+  // Ingresos a nivel negocio (ambas tiendas) para cruzar con gastos globales
+  const ingresosNegocio = useMemo(()=>
+    filas.filter(f=>f.esVenta && enRango(f,iniD,finD)
+      && (fOrigen==="todos"||f.origen===fOrigen) && (fVendedor==="todos"||f.vendedor===fVendedor))
+      .reduce((a,f)=>a+f.total,0)
+  ,[filas,fIni,fFin,fOrigen,fVendedor]);
+  const utilidad = ingresosNegocio - gastoTotal;
+  const margen   = safeDiv(utilidad, ingresosNegocio);      // % utilidad sobre ingresos
+  const retorno  = safeDiv(ingresosNegocio, gastoTotal);    // ingresos por cada $ de gasto
+  const serieGasto = useMemo(()=>{
+    // ingresos vs gasto por día (para el periodo con datos de gasto)
+    const m={};
+    gastos.dias.forEach(d=>{ if(!enRango({fecha:d.fecha},iniD,finD))return; const k=d.k; m[k]=m[k]||{k,gasto:0,ingreso:0}; m[k].gasto+=d.gasto; });
+    filas.forEach(f=>{ if(!f.esVenta||!f.fecha)return; if(!enRango(f,iniD,finD))return; const k=ymd(f.fecha).slice(5); if(m[k]){m[k].ingreso+=f.total;} });
+    return Object.values(m).sort((a,b)=>a.k<b.k?-1:1);
+  },[gastos,filas,fIni,fFin]);
+
+  /* ---------- EMBUDO DE MARKETING (pestaña MARKETING_JULIO) ---------- */
+  const marketing = useMemo(()=>parseMarketing(mktTxt),[mktTxt]);
+  const mktVacio = marketing.contactos + marketing.cotizaciones + marketing.ventas === 0;
+
+  /* ---------- Exportar CSV ---------- */
+  const exportar = ()=>{
+    const filasExp = filtradas.map(f=>({
+      Fecha: f.fecha?ymd(f.fecha):"", Tienda: STORE[f.tienda].nombre, Sede: STORE[f.tienda].sede,
+      Vendedor:f.vendedor, Origen:f.origen, Venta:f.esVenta?"SI":"NO", Pedido:f.pedido,
+      Producto:f.producto, Ciudad:f.ciudad, Pago:f.pago, Total:f.total, Pagado:f.pagado, PorCobrar:f.cobrar
+    }));
+    const kpiRows = [
+      {Metrica:"— KPIs —"},
+      {Metrica:"Ingresos Imperial",Valor:kImp.ingresos},{Metrica:"Ingresos El Rey",Valor:kRey.ingresos},
+      {Metrica:"Pedidos Imperial",Valor:kImp.nVentas},{Metrica:"Pedidos El Rey",Valor:kRey.nVentas},
+      {Metrica:"Ticket Imperial",Valor:Math.round(kImp.ticket||0)},{Metrica:"Ticket El Rey",Valor:Math.round(kRey.ticket||0)},
+    ];
+    const csv = Papa.unparse(filasExp) + "\n\n" + Papa.unparse(kpiRows);
+    const blob = new Blob(["﻿"+csv],{type:"text/csv;charset=utf-8"});
+    const a=document.createElement("a"); a.href=URL.createObjectURL(blob);
+    a.download="dashboard_muebles_"+ymd(new Date())+".csv"; a.click();
+  };
+
+  const usarPegado = ()=>{
+    if(!pegar.trim()) return;
+    const p = parseFuente(pegar);
+    if(p.body.length){ setRaw(p); setEstado("respaldo"); setUltAct(new Date()); }
+  };
+  const onFile = (e)=>{
+    const file=e.target.files[0]; if(!file)return;
+    const rd=new FileReader(); rd.onload=()=>{ const p=parseFuente(rd.result); if(p.body.length){setRaw(p);setEstado("respaldo");setUltAct(new Date());} };
+    rd.readAsText(file,"utf-8");
+  };
+
+  /* ================= RENDER ================= */
+  const mostrarImp = vista==="ambas"||vista==="imperial"||vista==="comparativa";
+  const mostrarRey = vista==="ambas"||vista==="elrey"||vista==="comparativa";
+  const gan = (a,b,inv=false)=> a==null||b==null ? null : (inv? a<b : a>b);
+
+  return (
+    <div className="max-w-[1400px] mx-auto px-4 py-6">
+      {/* ---------- Encabezado ---------- */}
+      <header className="flex flex-wrap items-center justify-between gap-4 mb-5">
+        <div>
+          <h1 className="text-2xl font-bold tracking-tight">
+            <span className="gold-text">Muebles Imperial</span>
+            <span className="text-[var(--muted)] mx-2 font-light">·</span>
+            <span className="steel-text">El Rey</span>
+          </h1>
+          <p className="text-xs text-[var(--muted)] mt-1">Dashboard comparativo de rendimiento comercial · Jamundí &amp; Cerritos</p>
+        </div>
+        <div className="flex items-center gap-3 text-xs">
+          <span className="flex items-center gap-2">
+            <span className="w-2 h-2 rounded-full" style={{background: estado==="vivo"?"var(--green)":estado==="respaldo"?"var(--amber)":estado==="error"?"var(--red)":"var(--muted)"}}></span>
+            {estado==="vivo"?"En vivo":estado==="respaldo"?"Datos de respaldo":estado==="cargando"?"Cargando…":"Error"}
+          </span>
+          {ultAct && <span className="text-[var(--muted)]">Actualizado {ultAct.toLocaleTimeString("es-CO")}</span>}
+          <button className="btn" onClick={cargar}>↻ Actualizar ahora</button>
+          <button className="btn" onClick={()=>setMostrarMapeo(v=>!v)}>⚙ Mapeo</button>
+          <button className="btn" onClick={exportar}>⭳ Exportar CSV</button>
+        </div>
+      </header>
+
+      {/* ---------- Aviso datos de respaldo / carga ---------- */}
+      {estado==="respaldo" &&
+        <div className="card p-3 mb-4 text-xs" style={{borderColor:"var(--amber)"}}>
+          <b className="text-[var(--amber)]">Modo respaldo.</b> No se pudo leer la hoja en vivo (probablemente no está publicada como “cualquiera con el enlace”). Se muestran los últimos datos incluidos en el archivo. También puedes pegar o subir un CSV abajo.
+          <div className="flex flex-wrap gap-2 mt-2 items-center">
+            <input type="file" accept=".csv,text/csv" onChange={onFile} className="text-[11px]" />
+            <textarea className="inp flex-1 min-w-[220px]" rows="1" placeholder="…o pega aquí el contenido del CSV" value={pegar} onChange={e=>setPegar(e.target.value)} />
+            <button className="btn" onClick={usarPegado}>Cargar pegado</button>
+          </div>
+        </div>}
+
+      {/* ---------- Panel de mapeo ---------- */}
+      {mostrarMapeo &&
+        <div className="card p-4 mb-4 fade">
+          <h3 className="text-sm font-semibold mb-3">Mapeo de columnas y tiendas</h3>
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+            {Object.keys(HEADER_HINTS).map(campo=>(
+              <div key={campo}>
+                <div className="lbl mb-1">{campo}</div>
+                <select className="inp" value={colMap[campo]??-1} onChange={e=>setColMap(m=>({...m,[campo]:+e.target.value}))}>
+                  <option value={-1}>—</option>
+                  {raw.headers.map((h,i)=><option key={i} value={i}>{h||("Col "+(i+1))}</option>)}
+                </select>
+              </div>
+            ))}
+          </div>
+          <div className="grid grid-cols-2 gap-3 mt-3">
+            <div>
+              <div className="lbl mb-1" style={{color:COL.imperial}}>Valor SEDE = Imperial (Jamundí)</div>
+              <select className="inp" value={mapImperial} onChange={e=>setMapImperial(e.target.value)}>
+                {sedesUnicas.map(s=><option key={s} value={s}>{s}</option>)}
+              </select>
+            </div>
+            <div>
+              <div className="lbl mb-1" style={{color:COL.elrey}}>Valor SEDE = El Rey (Cerritos)</div>
+              <select className="inp" value={mapElrey} onChange={e=>setMapElrey(e.target.value)}>
+                {sedesUnicas.map(s=><option key={s} value={s}>{s}</option>)}
+              </select>
+            </div>
+          </div>
+          <p className="text-[11px] text-[var(--muted)] mt-2">Detectado automáticamente. Ajusta si algún campo quedó mal asignado. Nota: la hoja es un registro de <b>ventas</b>, no de inversión publicitaria, por eso los indicadores son de ventas (ROAS/CPC/CTR requieren datos de pauta que la hoja no tiene).</p>
+        </div>}
+
+      {/* ---------- Selector de vista ---------- */}
+      <div className="flex flex-wrap items-center gap-2 mb-4">
+        {[["ambas","Ambas tiendas"],["imperial","Solo Imperial"],["elrey","Solo El Rey"],["comparativa","Comparativa lado a lado"]].map(([v,l])=>(
+          <button key={v} className={"btn "+(vista===v?"btn-active":"")} onClick={()=>setVista(v)}>{l}</button>
+        ))}
+        <span className="mx-1 text-[var(--line)]">|</span>
+        <span className="lbl">Granularidad</span>
+        {[["dia","Día"],["semana","Semana"],["mes","Mes"]].map(([g,l])=>(
+          <button key={g} className={"chip "+(gran===g?"chip-on":"")} onClick={()=>setGran(g)}>{l}</button>
+        ))}
+      </div>
+
+      {/* ---------- Filtros ---------- */}
+      <div className="card p-3 mb-5 grid grid-cols-2 md:grid-cols-5 gap-3">
+        <div><div className="lbl mb-1">Desde</div><input type="date" className="inp" value={fIni} onChange={e=>setFIni(e.target.value)} min={rangoFechas?ymd(rangoFechas.min):undefined} max={rangoFechas?ymd(rangoFechas.max):undefined}/></div>
+        <div><div className="lbl mb-1">Hasta</div><input type="date" className="inp" value={fFin} onChange={e=>setFFin(e.target.value)} min={rangoFechas?ymd(rangoFechas.min):undefined} max={rangoFechas?ymd(rangoFechas.max):undefined}/></div>
+        <div><div className="lbl mb-1">Origen / Canal</div>
+          <select className="inp" value={fOrigen} onChange={e=>setFOrigen(e.target.value)}>
+            <option value="todos">Todos</option>{origenes.map(o=><option key={o} value={o}>{o}</option>)}
+          </select></div>
+        <div><div className="lbl mb-1">Vendedor</div>
+          <select className="inp" value={fVendedor} onChange={e=>setFVendedor(e.target.value)}>
+            <option value="todos">Todos</option>{vendedores.map(v=><option key={v} value={v}>{v}</option>)}
+          </select></div>
+        <div className="flex items-end gap-2">
+          <button className={"chip "+(verImperial?"chip-on":"")} style={{color:verImperial?COL.imperial:undefined,borderColor:verImperial?COL.imperial:undefined}} onClick={()=>setVerImperial(v=>!v)}>Imperial</button>
+          <button className={"chip "+(verElrey?"chip-on":"")} style={{color:verElrey?COL.elrey:undefined,borderColor:verElrey?COL.elrey:undefined}} onClick={()=>setVerElrey(v=>!v)}>El Rey</button>
+          <button className="btn" onClick={()=>{setFIni("");setFFin("");setFOrigen("todos");setFVendedor("todos");setVerImperial(true);setVerElrey(true);}}>Limpiar</button>
+        </div>
+      </div>
+
+      {/* ---------- Estado vacío ---------- */}
+      {filtradas.length===0 &&
+        <div className="card p-10 text-center text-[var(--muted)] mb-5">Sin datos para los filtros seleccionados.</div>}
+
+      {/* ---------- KPIs ---------- */}
+      {filtradas.length>0 && (vista!=="comparativa" ?
+        <div className="grid grid-cols-2 md:grid-cols-4 xl:grid-cols-7 gap-3 mb-6">
+          <KPI titulo="Ingresos" valor={fmtCOP(kAmbas.ingresos)} color="var(--gold)" actualNum={kAmbas.ingresos} previo={kPrevAmbas?.ingresos}/>
+          <KPI titulo="Pedidos" valor={fmtInt(kAmbas.nVentas)} actualNum={kAmbas.nVentas} previo={kPrevAmbas?.nVentas}/>
+          <KPI titulo="Ticket promedio" valor={kAmbas.ticket?fmtCOP(kAmbas.ticket):"—"} actualNum={kAmbas.ticket} previo={kPrevAmbas?.ticket}/>
+          <KPI titulo="% Cierre" valor={fmtPct(kAmbas.cierre)} sub={`${kAmbas.nVentas}/${kAmbas.registros}`} actualNum={kAmbas.cierre} previo={kPrevAmbas?.cierre}/>
+          <KPI titulo="Recaudado" valor={fmtCOP(kAmbas.pagado)} sub={fmtPct(kAmbas.pctCobrado)+" cobrado"} actualNum={kAmbas.pagado} previo={kPrevAmbas?.pagado}/>
+          <KPI titulo="Por cobrar" valor={fmtCOP(kAmbas.porCobrar)} invertir actualNum={kAmbas.porCobrar} previo={kPrevAmbas?.porCobrar}/>
+          <KPI titulo="Registros" valor={fmtInt(kAmbas.registros)} actualNum={kAmbas.registros} previo={kPrevAmbas?.registros}/>
+        </div>
+        :
+        <div className="space-y-3 mb-6">
+          {[["imperial",kImp,kPrevImp],["elrey",kRey,kPrevRey]].map(([t,k,kp])=>(
+            <div key={t}>
+              <div className="flex items-center gap-2 mb-2"><span className="w-3 h-3 rounded-full" style={{background:STORE[t].color}}></span>
+                <b style={{color:STORE[t].color}}>{STORE[t].nombre}</b><span className="text-xs text-[var(--muted)]">· {STORE[t].sede}</span></div>
+              <div className="grid grid-cols-2 md:grid-cols-4 xl:grid-cols-6 gap-3">
+                <KPI titulo="Ingresos" valor={fmtCOP(k.ingresos)} color={STORE[t].color} actualNum={k.ingresos} previo={kp?.ingresos} ganador={t==="imperial"?gan(kImp.ingresos,kRey.ingresos):gan(kRey.ingresos,kImp.ingresos)}/>
+                <KPI titulo="Pedidos" valor={fmtInt(k.nVentas)} actualNum={k.nVentas} previo={kp?.nVentas} ganador={t==="imperial"?gan(kImp.nVentas,kRey.nVentas):gan(kRey.nVentas,kImp.nVentas)} color={STORE[t].color}/>
+                <KPI titulo="Ticket prom." valor={k.ticket?fmtCOP(k.ticket):"—"} actualNum={k.ticket} previo={kp?.ticket} ganador={t==="imperial"?gan(kImp.ticket,kRey.ticket):gan(kRey.ticket,kImp.ticket)} color={STORE[t].color}/>
+                <KPI titulo="% Cierre" valor={fmtPct(k.cierre)} actualNum={k.cierre} previo={kp?.cierre} ganador={t==="imperial"?gan(kImp.cierre,kRey.cierre):gan(kRey.cierre,kImp.cierre)} color={STORE[t].color}/>
+                <KPI titulo="Recaudado" valor={fmtCOP(k.pagado)} sub={fmtPct(k.pctCobrado)} actualNum={k.pagado} previo={kp?.pagado} color={STORE[t].color}/>
+                <KPI titulo="Por cobrar" valor={fmtCOP(k.porCobrar)} invertir actualNum={k.porCobrar} previo={kp?.porCobrar} color={STORE[t].color}/>
+              </div>
+            </div>
+          ))}
+        </div>)}
+
+      {/* ---------- Planificador de metas mensuales ---------- */}
+      {filtradas.length>0 &&
+      <div className="card p-4 mb-6">
+        <div className="flex flex-wrap items-center justify-between gap-2 mb-3">
+          <h3 className="text-sm font-semibold">🎯 Planificador de Meta de Ventas Mensual por tienda</h3>
+          <div className="flex items-center gap-2">
+            <span className="lbl">Mes</span>
+            <input type="month" className="inp w-auto" value={mesPlan} onChange={e=>setMesPlan(e.target.value)} />
+          </div>
+        </div>
+        <div className="grid md:grid-cols-2 gap-4">
+          {[["imperial",pImp],["elrey",pRey]].map(([t,p])=>{
+            const est=estadoMeta(p);
+            return (
+              <div key={t} className="rounded-xl p-4" style={{border:`1px solid ${STORE[t].color}44`,background:"var(--panel2)"}}>
+                <div className="flex items-center justify-between mb-2">
+                  <b style={{color:STORE[t].color}}>{STORE[t].nombre}</b>
+                  <span className="text-xs font-semibold" style={{color:est.c}}>{est.e} {est.t}</span>
+                </div>
+                <div className="grid grid-cols-2 gap-2 text-xs mb-3">
+                  <div><div className="lbl">Meta del mes</div>
+                    <input className="inp mt-1" value={metas[t+"|"+mesPlan] ?? objetivos[t]} onChange={e=>setMeta(t,e.target.value)} /></div>
+                  <div><div className="lbl">Ventas reales</div><div className="text-base font-bold mt-1" style={{color:STORE[t].color}}>{fmtCOP(p.real)}</div></div>
+                </div>
+                {/* Barra de progreso */}
+                <div className="lbl flex justify-between"><span>Ejecución</span><span>{fmtPct(p.cumplido)}</span></div>
+                <div className="h-3 rounded-full bg-[#0e0e12] overflow-hidden mt-1 relative">
+                  <div className="h-full" style={{width:Math.min(100,p.cumplido)+"%",background:STORE[t].color}}></div>
+                  <div className="absolute top-0 h-full w-[2px] bg-white/50" style={{left:Math.min(100,p.pace*100)+"%"}} title="Ritmo esperado"></div>
+                </div>
+                <div className="grid grid-cols-3 gap-2 mt-3 text-center">
+                  <div><div className="lbl">Pacing</div><div className="text-xs font-semibold" style={{color: p.real>=p.metaEsperadaHoy?"var(--green)":"var(--red)"}}>{p.real>=p.metaEsperadaHoy?"Adelantado":"Atrasado"}</div></div>
+                  <div><div className="lbl">Proyección fin de mes</div><div className="text-xs font-semibold">{fmtCOP(p.proyeccion)}</div></div>
+                  <div><div className="lbl">Día {p.diaRef}/{p.dim}</div><div className="text-xs font-semibold">{fmtPct(p.pace*100,0)} del mes</div></div>
+                </div>
+                {/* Simulador */}
+                <div className="mt-3 pt-3 border-t border-[var(--line)]">
+                  <div className="lbl flex justify-between mb-1"><span>Simulador · meta hipotética</span><span>{fmtCOP(p.metaSim)}</span></div>
+                  <input type="range" min={0} max={Math.max(p.meta*2, p.real*1.5, 10000000)} step={500000}
+                    value={p.metaSim} onChange={e=>setSim(t,+e.target.value)} style={{width:"100%",accentColor:STORE[t].color}} />
+                  <div className="text-[11px] text-[var(--muted)] mt-1">Proyección vs meta simulada: <b style={{color:est.c}}>{p.proyVsMeta==null?"—":(p.proyVsMeta*100).toFixed(0)+"%"}</b></div>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+        {consejoInversion &&
+          <div className="mt-3 text-xs rounded-lg p-3" style={{background:"var(--panel2)",border:"1px solid var(--line)"}}>
+            💡 <b>¿Dónde enfocar el próximo esfuerzo comercial?</b> Según valor esperado por registro (ticket × % de cierre),
+            conviene priorizar <b style={{color:STORE[consejoInversion.gana].color}}>{STORE[consejoInversion.gana].nombre}</b>
+            {" "}· Imperial {fmtCOP(consejoInversion.vi)} vs El Rey {fmtCOP(consejoInversion.vr)} por registro.
+          </div>}
+      </div>}
+
+      {/* ---------- Gastos y Rentabilidad (pestaña GASTOS) ---------- */}
+      {filtradas.length>0 &&
+      <div className="card p-4 mb-6">
+        <div className="flex items-center justify-between mb-3">
+          <h3 className="text-sm font-semibold">💰 Gastos y rentabilidad del negocio</h3>
+          <span className="text-[11px] text-[var(--muted)]">Pestaña GASTOS · a nivel negocio (no separa tiendas)</span>
+        </div>
+        {gastos.dias.length>=5 ?
+          <>
+            <div className="grid grid-cols-2 md:grid-cols-5 gap-3 mb-3">
+              <KPI titulo="Ingresos" valor={fmtCOP(ingresosNegocio)} color="var(--gold)"/>
+              <KPI titulo="Gastos operativos" valor={fmtCOP(gastoTotal)} invertir/>
+              <KPI titulo="Utilidad estimada" valor={fmtCOP(utilidad)} color={utilidad>=0?"var(--green)":"var(--red)"}/>
+              <KPI titulo="Margen" valor={margen==null?"—":fmtPct(margen*100)} sub="utilidad / ingresos"/>
+              <KPI titulo="Retorno sobre gasto" valor={retorno==null?"—":retorno.toFixed(2)+"x"} sub="ingresos por $ de gasto"/>
+            </div>
+            <div style={{width:"100%",height:220}}>
+              <ResponsiveContainer>
+                <BarChart data={serieGasto}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#22222a"/>
+                  <XAxis dataKey="k" tick={{fontSize:10,fill:"#9a9aa6"}}/>
+                  <YAxis tick={{fontSize:10,fill:"#9a9aa6"}} tickFormatter={v=>"$"+(v/1e6)+"M"}/>
+                  <Tooltip contentStyle={boxTip} formatter={(v,n)=>[fmtCOP(v),n==="ingreso"?"Ingresos":"Gastos"]}/>
+                  <Legend formatter={v=>v==="ingreso"?"Ingresos":"Gastos"}/>
+                  <Bar dataKey="ingreso" fill={COL.imperial} radius={[4,4,0,0]}/>
+                  <Bar dataKey="gasto" fill="#f2555a" radius={[4,4,0,0]}/>
+                </BarChart>
+              </ResponsiveContainer>
+            </div>
+          </>
+          :
+          <div className="text-xs rounded-lg p-4" style={{background:"var(--panel2)",border:"1px dashed var(--line)"}}>
+            🔌 <b>Módulo listo y conectado a la pestaña GASTOS.</b> Aún casi no hay gastos registrados, por eso no se muestra rentabilidad todavía.
+            En cuanto el equipo diligencie GASTOS (gas, proveedor, gasolina, acarreo, comisiones, varios), aquí aparecerán automáticamente
+            <b> Utilidad</b>, <b>Margen</b> y <b>Retorno sobre gasto</b>. <span className="text-[var(--muted)]">Nota: esta hoja NO contiene inversión en pauta, por eso no hay ROAS publicitario.</span>
+          </div>}
+      </div>}
+
+      {/* ---------- Embudo de Marketing (pestaña MARKETING_JULIO) ---------- */}
+      {filtradas.length>0 &&
+      <div className="card p-4 mb-6">
+        <div className="flex items-center justify-between mb-3">
+          <h3 className="text-sm font-semibold">📣 Embudo de marketing · Contactos → Cotizaciones → Ventas</h3>
+          <span className="text-[11px] text-[var(--muted)]">Pestaña MARKETING_JULIO</span>
+        </div>
+        {!mktVacio ?
+          <div className="grid md:grid-cols-2 gap-4">
+            <div style={{width:"100%",height:220}}>
+              <ResponsiveContainer>
+                <BarChart layout="vertical" data={[
+                  {etapa:"Contactos", v:marketing.contactos},
+                  {etapa:"Cotizaciones", v:marketing.cotizaciones},
+                  {etapa:"Ventas", v:marketing.ventas},
+                ]} margin={{left:20}}>
+                  <XAxis type="number" tick={{fontSize:10,fill:"#9a9aa6"}} allowDecimals={false}/>
+                  <YAxis type="category" dataKey="etapa" tick={{fontSize:11,fill:"#9a9aa6"}} width={90}/>
+                  <Tooltip contentStyle={boxTip}/>
+                  <Bar dataKey="v" fill={COL.imperial} radius={[0,4,4,0]} label={{position:"right",fill:"#EDEDF0",fontSize:11}}/>
+                </BarChart>
+              </ResponsiveContainer>
+            </div>
+            <div>
+              <div className="grid grid-cols-3 gap-2 mb-3">
+                <KPI titulo="Contactos" valor={fmtInt(marketing.contactos)} sub="leads"/>
+                <KPI titulo="Ventas" valor={fmtInt(marketing.ventas)} sub="cerradas"/>
+                <KPI titulo="Tasa de cierre" valor={fmtPct(safeDiv(marketing.ventas,marketing.contactos)*100)} sub="ventas / contactos"/>
+              </div>
+              <div className="overflow-x-auto">
+                <table className="w-full text-xs">
+                  <thead><tr className="text-[var(--muted)] text-left"><th className="py-1 pr-2">Vendedor</th><th className="text-right">Contactos</th><th className="text-right">Cotiz.</th><th className="text-right">Ventas</th></tr></thead>
+                  <tbody>{marketing.vendedores.map((v,i)=>(
+                    <tr key={i} className="border-t border-[var(--line)]"><td className="py-1 pr-2">{v.vendedor}</td><td className="text-right">{v.contactos}</td><td className="text-right">{v.cotizaciones}</td><td className="text-right">{v.ventas}</td></tr>
+                  ))}</tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+          :
+          <div className="text-xs rounded-lg p-4" style={{background:"var(--panel2)",border:"1px dashed var(--line)"}}>
+            🔌 <b>Módulo listo y conectado a la pestaña MARKETING_JULIO.</b> Aún no hay registros de contactos/cotizaciones.
+            Cuando el equipo diligencie el embudo diario por vendedor, aquí verás el flujo <b>Contactos → Cotizaciones → Ventas</b>,
+            las tasas de cotización y de cierre, y el desglose por vendedor.
+          </div>}
+      </div>}
+
+      {/* ---------- Gráficos ---------- */}
+      {filtradas.length>0 &&
+      <div className="grid lg:grid-cols-2 gap-4 mb-4">
+
+        {/* 1. Serie temporal ingresos */}
+        <ChartCard titulo="Ingresos en el tiempo por tienda">
+          <ResponsiveContainer>
+            <AreaChart data={serie}>
+              <defs>
+                <linearGradient id="gI" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor={COL.imperial} stopOpacity={0.5}/><stop offset="100%" stopColor={COL.imperial} stopOpacity={0}/></linearGradient>
+                <linearGradient id="gR" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor={COL.elrey} stopOpacity={0.5}/><stop offset="100%" stopColor={COL.elrey} stopOpacity={0}/></linearGradient>
+              </defs>
+              <CartesianGrid strokeDasharray="3 3" stroke="#22222a"/>
+              <XAxis dataKey="k" tick={{fontSize:10,fill:"#9a9aa6"}}/>
+              <YAxis tick={{fontSize:10,fill:"#9a9aa6"}} tickFormatter={v=>"$"+(v/1e6)+"M"}/>
+              <Tooltip contentStyle={boxTip} formatter={(v,n)=>[fmtCOP(v),n==="imperial"?"Imperial":"El Rey"]}/>
+              <Legend formatter={v=>v==="imperial"?"Imperial":"El Rey"}/>
+              {verImperial&&mostrarImp&&<Area type="monotone" dataKey="imperial" stroke={COL.imperial} fill="url(#gI)" strokeWidth={2}/>}
+              {verElrey&&mostrarRey&&<Area type="monotone" dataKey="elrey" stroke={COL.elrey} fill="url(#gR)" strokeWidth={2}/>}
+            </AreaChart>
+          </ResponsiveContainer>
+        </ChartCard>
+
+        {/* 2. Nº de pedidos en el tiempo */}
+        <ChartCard titulo="Nº de pedidos en el tiempo">
+          <ResponsiveContainer>
+            <LineChart data={serie}>
+              <CartesianGrid strokeDasharray="3 3" stroke="#22222a"/>
+              <XAxis dataKey="k" tick={{fontSize:10,fill:"#9a9aa6"}}/>
+              <YAxis tick={{fontSize:10,fill:"#9a9aa6"}} allowDecimals={false}/>
+              <Tooltip contentStyle={boxTip} formatter={(v,n)=>[v,n==="imperialP"?"Imperial":"El Rey"]}/>
+              <Legend formatter={v=>v==="imperialP"?"Imperial":"El Rey"}/>
+              {verImperial&&mostrarImp&&<Line type="monotone" dataKey="imperialP" stroke={COL.imperial} strokeWidth={2} dot={false}/>}
+              {verElrey&&mostrarRey&&<Line type="monotone" dataKey="elreyP" stroke={COL.elrey} strokeWidth={2} dot={false}/>}
+            </LineChart>
+          </ResponsiveContainer>
+        </ChartCard>
+
+        {/* 3. Comparativa directa */}
+        <ChartCard titulo="Comparativa directa Imperial vs El Rey">
+          <ResponsiveContainer>
+            <BarChart data={compData}>
+              <CartesianGrid strokeDasharray="3 3" stroke="#22222a"/>
+              <XAxis dataKey="métrica" tick={{fontSize:11,fill:"#9a9aa6"}}/>
+              <YAxis tick={{fontSize:10,fill:"#9a9aa6"}}/>
+              <Tooltip contentStyle={boxTip}/>
+              <Legend/>
+              <Bar dataKey="Imperial" fill={COL.imperial} radius={[4,4,0,0]}/>
+              <Bar dataKey="El Rey" fill={COL.elrey} radius={[4,4,0,0]}/>
+            </BarChart>
+          </ResponsiveContainer>
+        </ChartCard>
+
+        {/* 4. Ventas por origen (barras agrupadas) */}
+        <ChartCard titulo="Ventas por origen / canal en cada tienda">
+          <ResponsiveContainer>
+            <BarChart data={origenData} layout="vertical" margin={{left:20}}>
+              <CartesianGrid strokeDasharray="3 3" stroke="#22222a"/>
+              <XAxis type="number" tick={{fontSize:10,fill:"#9a9aa6"}} tickFormatter={v=>"$"+(v/1e6)+"M"}/>
+              <YAxis type="category" dataKey="origen" tick={{fontSize:10,fill:"#9a9aa6"}} width={110}/>
+              <Tooltip contentStyle={boxTip} formatter={(v,n)=>[fmtCOP(v),n==="imperial"?"Imperial":"El Rey"]}/>
+              <Legend formatter={v=>v==="imperial"?"Imperial":"El Rey"}/>
+              {verImperial&&<Bar dataKey="imperial" fill={COL.imperial} radius={[0,4,4,0]}/>}
+              {verElrey&&<Bar dataKey="elrey" fill={COL.elrey} radius={[0,4,4,0]}/>}
+            </BarChart>
+          </ResponsiveContainer>
+        </ChartCard>
+
+        {/* 4b. Donas de participación por origen */}
+        {[["imperial",mostrarImp],["elrey",mostrarRey]].filter(([t,s])=>s).map(([t])=>(
+          <ChartCard key={t} titulo={`Participación por canal · ${STORE[t].nombre}`} alto={240}>
+            <ResponsiveContainer>
+              <PieChart>
+                <Pie data={donaOrigen(t)} dataKey="value" nameKey="name" innerRadius={45} outerRadius={80} paddingAngle={2}>
+                  {donaOrigen(t).map((e,i)=><Cell key={i} fill={ORIGEN_COLORS[i%ORIGEN_COLORS.length]}/>)}
+                </Pie>
+                <Tooltip contentStyle={boxTip} formatter={v=>fmtCOP(v)}/>
+                <Legend wrapperStyle={{fontSize:10}}/>
+              </PieChart>
+            </ResponsiveContainer>
+          </ChartCard>
+        ))}
+
+        {/* 5. Embudo por tienda */}
+        {[["imperial",mostrarImp],["elrey",mostrarRey]].filter(([t,s])=>s).map(([t])=>(
+          <ChartCard key={t} titulo={`Embudo de conversión · ${STORE[t].nombre}`} alto={200}>
+            <ResponsiveContainer>
+              <BarChart data={embudo(t)} layout="vertical" margin={{left:20}}>
+                <XAxis type="number" tick={{fontSize:10,fill:"#9a9aa6"}} allowDecimals={false}/>
+                <YAxis type="category" dataKey="etapa" tick={{fontSize:11,fill:"#9a9aa6"}} width={100}/>
+                <Tooltip contentStyle={boxTip}/>
+                <Bar dataKey="v" fill={STORE[t].color} radius={[0,4,4,0]} label={{position:"right",fill:"#EDEDF0",fontSize:11}}/>
+              </BarChart>
+            </ResponsiveContainer>
+          </ChartCard>
+        ))}
+
+        {/* 8. Distribución por producto (treemap) */}
+        <ChartCard titulo="Distribución de ventas por producto (Top 12)">
+          <ResponsiveContainer>
+            <Treemap data={topProd} dataKey="value" nameKey="name" stroke="#0b0b0d"
+              content={<TreeCell/>}/>
+          </ResponsiveContainer>
+        </ChartCard>
+
+        {/* Forma de pago */}
+        <ChartCard titulo="Ingresos por forma de pago">
+          <ResponsiveContainer>
+            <BarChart data={pagoData}>
+              <CartesianGrid strokeDasharray="3 3" stroke="#22222a"/>
+              <XAxis dataKey="name" tick={{fontSize:9,fill:"#9a9aa6"}} interval={0} angle={-20} textAnchor="end" height={50}/>
+              <YAxis tick={{fontSize:10,fill:"#9a9aa6"}} tickFormatter={v=>"$"+(v/1e6)+"M"}/>
+              <Tooltip contentStyle={boxTip} formatter={v=>fmtCOP(v)}/>
+              <Bar dataKey="value" fill={COL.imperial} radius={[4,4,0,0]}/>
+            </BarChart>
+          </ResponsiveContainer>
+        </ChartCard>
+      </div>}
+
+      {/* ---------- Mapa de calor por día de semana ---------- */}
+      {filtradas.length>0 &&
+      <div className="card p-4 mb-4">
+        <h3 className="text-sm font-semibold mb-3">Mapa de calor · ingresos por día de la semana</h3>
+        {[["imperial",mostrarImp],["elrey",mostrarRey]].filter(([t,s])=>s).map(([t])=>{
+          const arr=heat[t]; const mx=Math.max(...arr,1);
+          return (
+            <div key={t} className="mb-3">
+              <div className="text-xs mb-1" style={{color:STORE[t].color}}>{STORE[t].nombre}</div>
+              <div className="grid grid-cols-7 gap-1">
+                {arr.map((v,i)=>{
+                  const int=v/mx;
+                  return <div key={i} className="rounded-md p-2 text-center" title={fmtCOP(v)}
+                    style={{background:`color-mix(in srgb, ${STORE[t].color} ${Math.round(int*85)}%, #14141a)`}}>
+                    <div className="text-[10px] text-[var(--muted)]">{DIAS[i]}</div>
+                    <div className="text-[11px] font-semibold">{v>0?"$"+(v/1e6).toFixed(1)+"M":"—"}</div>
+                  </div>;
+                })}
+              </div>
+            </div>
+          );
+        })}
+      </div>}
+
+      {/* ---------- Tablas: Top vendedores y productos ---------- */}
+      {filtradas.length>0 &&
+      <div className="grid lg:grid-cols-2 gap-4 mb-8">
+        <div className="card p-4">
+          <div className="flex items-center justify-between mb-2">
+            <h3 className="text-sm font-semibold">Top vendedores</h3>
+            <div className="flex gap-1">
+              {[["ingresos","Ingresos"],["pedidos","Pedidos"],["ticket","Ticket"]].map(([k,l])=>(
+                <button key={k} className={"chip "+(ordenVend===k?"chip-on":"")} onClick={()=>setOrdenVend(k)}>{l}</button>
+              ))}
+            </div>
+          </div>
+          <div className="overflow-x-auto">
+            <table className="w-full text-xs">
+              <thead><tr className="text-[var(--muted)] text-left">
+                <th className="py-1 pr-2">Vendedor</th><th>Tienda</th><th className="text-right">Ingresos</th><th className="text-right">Pedidos</th><th className="text-right">Ticket</th>
+              </tr></thead>
+              <tbody>
+                {topVend.map((v,i)=>{
+                  const mx=topVend[0]?.[ordenVend]||1;
+                  return <tr key={i} className="border-t border-[var(--line)]">
+                    <td className="py-1 pr-2 font-medium">{v.vendedor}</td>
+                    <td><span className="w-2 h-2 inline-block rounded-full mr-1" style={{background:STORE[v.tienda].color}}></span>{STORE[v.tienda].sede}</td>
+                    <td className="text-right relative">
+                      <div className="absolute inset-y-1 right-0 rounded" style={{width:(v[ordenVend]/mx*100)+"%",background:STORE[v.tienda].color,opacity:.15}}></div>
+                      <span className="relative">{fmtCOP(v.ingresos)}</span></td>
+                    <td className="text-right relative">{v.pedidos}</td>
+                    <td className="text-right">{fmtCOP(v.ticket)}</td>
+                  </tr>;
+                })}
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <div className="card p-4">
+          <h3 className="text-sm font-semibold mb-2">Top productos</h3>
+          <div className="overflow-x-auto">
+            <table className="w-full text-xs">
+              <thead><tr className="text-[var(--muted)] text-left"><th className="py-1 pr-2">Producto</th><th className="text-right">Ingresos</th><th className="text-right">Unidades</th></tr></thead>
+              <tbody>
+                {topProd.map((p,i)=>{
+                  const mx=topProd[0]?.value||1;
+                  return <tr key={i} className="border-t border-[var(--line)]">
+                    <td className="py-1 pr-2">{p.name}</td>
+                    <td className="text-right relative">
+                      <div className="absolute inset-y-1 right-0 rounded" style={{width:(p.value/mx*100)+"%",background:COL.imperial,opacity:.15}}></div>
+                      <span className="relative">{fmtCOP(p.value)}</span></td>
+                    <td className="text-right">{p.n}</td>
+                  </tr>;
+                })}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>}
+
+      <footer className="text-center text-[11px] text-[var(--muted)] pb-6">
+        Dashboard comparativo · datos desde Google Sheets (re-consulta cada 60 s). Moneda en COP.
+        {estado==="respaldo" && " · Actualmente en modo respaldo."}
+      </footer>
+    </div>
+  );
+}
+
+// Celda personalizada para el Treemap
+function TreeCell(props){
+  const {x,y,width,height,name,value,index} = props;
+  const c = ORIGEN_COLORS[index%ORIGEN_COLORS.length];
+  return (
+    <g>
+      <rect x={x} y={y} width={width} height={height} style={{fill:c,fillOpacity:0.55,stroke:"#0b0b0d",strokeWidth:2}}/>
+      {width>60&&height>24 &&
+        <text x={x+6} y={y+16} fill="#151208" fontSize={11} fontWeight="600">{name}</text>}
+      {width>60&&height>38 &&
+        <text x={x+6} y={y+30} fill="#151208" fontSize={10}>{"$"+((value||0)/1e6).toFixed(1)+"M"}</text>}
+    </g>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App/>);
+</script>
+</body>
+</html>
