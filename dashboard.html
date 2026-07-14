@@ -65,9 +65,9 @@ const EXPORT = gid => `https://docs.google.com/spreadsheets/d/${SHEET_ID}/export
 const GVIZ   = `https://docs.google.com/spreadsheets/d/${SHEET_ID}/gviz/tq?tqx=out:csv`;
 // gid de cada pestaña del libro "SEGUIMIENTO_PEDIDOS_MUEBLES_EL REY UNIFICADO"
 const TABS = {
-  ventas:    [EXPORT("1400904314"), EXPORT("0"), GVIZ], // JULIO (ambas tiendas)
-  gastos:    [EXPORT("2010891201")],                    // GASTOS (operativos)
-  marketing: [EXPORT("1892758411")],                    // MARKETING_JULIO (embudo)
+  ventas:    [EXPORT("0"), GVIZ],   // JULIO principal (ambas tiendas, gid 0 = registro completo)
+  gastos:    [EXPORT("2010891201")],// GASTOS (operativos)
+  marketing: [EXPORT("1892758411")],// MARKETING_JULIO (embudo)
 };
 const REFRESH_MS = 60000; // re-consulta cada 60 s
 
